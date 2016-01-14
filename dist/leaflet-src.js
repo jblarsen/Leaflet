@@ -1,5 +1,5 @@
 /*
- Leaflet 1.0.0-beta.2 (30235ec), a JS library for interactive maps. http://leafletjs.com
+ Leaflet 1.0.0-beta.2 (efba21b), a JS library for interactive maps. http://leafletjs.com
  (c) 2010-2015 Vladimir Agafonkin, (c) 2010-2011 CloudMade
 */
 (function (window, document, undefined) {
@@ -604,6 +604,7 @@ L.Mixin = {Events: proto};
 	L.Browser = {
 		ie: ie,
 		ielt9: ie && !document.addEventListener,
+		edge: 'msLaunchUri' in navigator && !('documentMode' in document),
 		webkit: webkit,
 		gecko: gecko,
 		android: ua.indexOf('android') !== -1,
@@ -1825,9 +1826,10 @@ L.Map = L.Evented.extend({
 		var center = this.getCenter(),
 		    newCenter = this._limitCenter(center, this._zoom, L.latLngBounds(bounds));
 
-		if (center.equals(newCenter)) { return this; }
+		if (!center.equals(newCenter)) {
+			this.panTo(newCenter, options);
+		}
 
-		this.panTo(newCenter, options);
 		this._enforcingBounds = false;
 		return this;
 	},
@@ -2292,10 +2294,16 @@ L.Map = L.Evented.extend({
 		var targets = [],
 		    target,
 		    isHover = type === 'mouseout' || type === 'mouseover',
-		    src = e.target || e.srcElement;
+		    src = e.target || e.srcElement,
+		    dragging = false;
 
 		while (src) {
 			target = this._targets[L.stamp(src)];
+			if (target && (type === 'click' || type === 'preclick') && !e._simulated && this._draggableMoved(target)) {
+				// Prevent firing click after you just dragged an object.
+				dragging = true;
+				break;
+			}
 			if (target && target.listens(type, true)) {
 				if (isHover && !L.DomEvent._isExternalTarget(src, e)) { break; }
 				targets.push(target);
@@ -2304,7 +2312,7 @@ L.Map = L.Evented.extend({
 			if (src === this._container) { break; }
 			src = src.parentNode;
 		}
-		if (!targets.length && !isHover && L.DomEvent._isExternalTarget(src, e)) {
+		if (!targets.length && !dragging && !isHover && L.DomEvent._isExternalTarget(src, e)) {
 			targets = [this];
 		}
 		return targets;
@@ -2343,9 +2351,6 @@ L.Map = L.Evented.extend({
 		if (type === 'contextmenu' && target.listens(type, true)) {
 			L.DomEvent.preventDefault(e);
 		}
-
-		// prevents firing click after you just dragged an object
-		if ((e.type === 'click' || e.type === 'preclick') && !e._simulated && this._draggableMoved(target)) { return; }
 
 		var data = {
 			originalEvent: e
@@ -2763,6 +2768,7 @@ L.GridLayer = L.Layer.extend({
 	},
 
 	onRemove: function (map) {
+		this._removeAllTiles();
 		L.DomUtil.remove(this._container);
 		map._removeZoomLimit(this);
 		this._container = null;
@@ -2939,6 +2945,7 @@ L.GridLayer = L.Layer.extend({
 				this._levels[z].el.style.zIndex = maxZoom - Math.abs(zoom - z);
 			} else {
 				L.DomUtil.remove(this._levels[z].el);
+				this._removeTilesAtZoom(z);
 				delete this._levels[z];
 			}
 		}
@@ -2995,6 +3002,15 @@ L.GridLayer = L.Layer.extend({
 		}
 	},
 
+	_removeTilesAtZoom: function (zoom) {
+		for (var key in this._tiles) {
+			if (this._tiles[key].coords.z !== zoom) {
+				continue;
+			}
+			this._removeTile(key);
+		}
+	},
+
 	_removeAllTiles: function () {
 		for (var key in this._tiles) {
 			this._removeTile(key);
@@ -3015,9 +3031,11 @@ L.GridLayer = L.Layer.extend({
 	_retainParent: function (x, y, z, minZoom) {
 		var x2 = Math.floor(x / 2),
 		    y2 = Math.floor(y / 2),
-		    z2 = z - 1;
+		    z2 = z - 1,
+		    coords2 = new L.Point(+x2, +y2);
+		coords2.z = +z2;
 
-		var key = x2 + ':' + y2 + ':' + z2,
+		var key = this._tileCoordsToKey(coords2),
 		    tile = this._tiles[key];
 
 		if (tile && tile.active) {
@@ -3040,7 +3058,10 @@ L.GridLayer = L.Layer.extend({
 		for (var i = 2 * x; i < 2 * x + 2; i++) {
 			for (var j = 2 * y; j < 2 * y + 2; j++) {
 
-				var key = i + ':' + j + ':' + (z + 1),
+				var coords = new L.Point(i, j);
+				coords.z = z + 1;
+
+				var key = this._tileCoordsToKey(coords),
 				    tile = this._tiles[key];
 
 				if (tile && tile.active) {
@@ -3484,7 +3505,7 @@ L.TileLayer = L.GridLayer.extend({
 
 	getTileUrl: function (coords) {
 		return L.Util.template(this._url, L.extend({
-			r: this.options.detectRetina && L.Browser.retina && this.options.maxZoom > 0 ? '@2x' : '',
+			r: L.Browser.retina ? '@2x' : '',
 			s: this._getSubdomain(coords),
 			x: coords.x,
 			y: this.options.tms ? this._globalTileRange.max.y - coords.y : coords.y,
@@ -5528,23 +5549,22 @@ L.Polyline = L.Path.extend({
 	},
 
 	_project: function () {
+		var pxBounds = new L.Bounds();
 		this._rings = [];
-		this._projectLatlngs(this._latlngs, this._rings);
+		this._projectLatlngs(this._latlngs, this._rings, pxBounds);
 
-		// project bounds as well to use later for Canvas hit detection/etc.
 		var w = this._clickTolerance(),
-		    p = new L.Point(w, -w);
+		    p = new L.Point(w, w);
 
 		if (this._bounds.isValid()) {
-			this._pxBounds = new L.Bounds(
-				this._map.latLngToLayerPoint(this._bounds.getSouthWest())._subtract(p),
-				this._map.latLngToLayerPoint(this._bounds.getNorthEast())._add(p));
+			pxBounds.min._subtract(p);
+			pxBounds.max._add(p);
+			this._pxBounds = pxBounds;
 		}
 	},
 
 	// recursively turns latlngs into a set of rings with projected coordinates
-	_projectLatlngs: function (latlngs, result) {
-
+	_projectLatlngs: function (latlngs, result, projectedBounds) {
 		var flat = latlngs[0] instanceof L.LatLng,
 		    len = latlngs.length,
 		    i, ring;
@@ -5553,11 +5573,12 @@ L.Polyline = L.Path.extend({
 			ring = [];
 			for (i = 0; i < len; i++) {
 				ring[i] = this._map.latLngToLayerPoint(latlngs[i]);
+				projectedBounds.extend(ring[i]);
 			}
 			result.push(ring);
 		} else {
 			for (i = 0; i < len; i++) {
-				this._projectLatlngs(latlngs[i], result);
+				this._projectLatlngs(latlngs[i], result, projectedBounds);
 			}
 		}
 	},
@@ -5949,6 +5970,10 @@ L.Circle = L.CircleMarker.extend({
 			    lat2 = map.unproject(p).lat,
 			    lngR = Math.acos((Math.cos(latR * d) - Math.sin(lat * d) * Math.sin(lat2 * d)) /
 			            (Math.cos(lat * d) * Math.cos(lat2 * d))) / d;
+
+			if (isNaN(lngR) || lngR === 0) {
+				lngR = latR / Math.cos(Math.PI / 180 * lat); // Fallback for edge case, #2425
+			}
 
 			this._point = p.subtract(map.getPixelOrigin());
 			this._radius = isNaN(lngR) ? 0 : Math.max(Math.round(p.x - map.project([lat2, lng - lngR]).x), 1);
@@ -6809,15 +6834,15 @@ L.extend(L.GeoJSON, {
 				L.GeoJSON.asFeature(newGeometry);
 	},
 
-	asFeature: function (geoJSON) {
-		if (geoJSON.type === 'Feature') {
-			return geoJSON;
+	asFeature: function (geojson) {
+		if (geojson.type === 'Feature') {
+			return geojson;
 		}
 
 		return {
 			type: 'Feature',
 			properties: {},
-			geometry: geoJSON
+			geometry: geojson
 		};
 	}
 });
@@ -6909,9 +6934,11 @@ L.LayerGroup.include({
 	}
 });
 
-L.geoJson = function (geojson, options) {
+L.geoJSON = function (geojson, options) {
 	return new L.GeoJSON(geojson, options);
 };
+// Backward compatibility.
+L.geoJson = L.geoJSON;
 
 
 
