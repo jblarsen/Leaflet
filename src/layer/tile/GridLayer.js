@@ -180,7 +180,7 @@ L.GridLayer = L.Layer.extend({
 			if (fade < 1) {
 				nextFrame = true;
 			} else {
-				if (tile.active) { willPrune = true; }
+				willPrune = true;
 				tile.active = true;
 			}
 		}
@@ -444,8 +444,9 @@ L.GridLayer = L.Layer.extend({
 
 	_getTiledPixelBounds: function (center) {
 		var map = this._map,
+		    scale = map.getZoomScale(map.getZoom(), this._tileZoom),
 		    pixelCenter = map.project(center, this._tileZoom).floor(),
-		    halfSize = map.getSize().divideBy(2);
+		    halfSize = map.getSize().divideBy(scale * 2);
 
 		return new L.Bounds(pixelCenter.subtract(halfSize), pixelCenter.add(halfSize));
 	},
