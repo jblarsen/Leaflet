@@ -1,5 +1,5 @@
 /*
- Leaflet 1.0.0-beta.2 (efba21b), a JS library for interactive maps. http://leafletjs.com
+ Leaflet 1.0.0-beta.2 (9fd46a7), a JS library for interactive maps. http://leafletjs.com
  (c) 2010-2015 Vladimir Agafonkin, (c) 2010-2011 CloudMade
 */
 (function (window, document, undefined) {
@@ -2907,7 +2907,7 @@ L.GridLayer = L.Layer.extend({
 			if (fade < 1) {
 				nextFrame = true;
 			} else {
-				if (tile.active) { willPrune = true; }
+				willPrune = true;
 				tile.active = true;
 			}
 		}
@@ -3171,8 +3171,9 @@ L.GridLayer = L.Layer.extend({
 
 	_getTiledPixelBounds: function (center) {
 		var map = this._map,
+		    scale = map.getZoomScale(map.getZoom(), this._tileZoom),
 		    pixelCenter = map.project(center, this._tileZoom).floor(),
-		    halfSize = map.getSize().divideBy(2);
+		    halfSize = map.getSize().divideBy(scale * 2);
 
 		return new L.Bounds(pixelCenter.subtract(halfSize), pixelCenter.add(halfSize));
 	},
@@ -5556,7 +5557,7 @@ L.Polyline = L.Path.extend({
 		var w = this._clickTolerance(),
 		    p = new L.Point(w, w);
 
-		if (this._bounds.isValid()) {
+		if (this._bounds.isValid() && pxBounds.isValid()) {
 			pxBounds.min._subtract(p);
 			pxBounds.max._add(p);
 			this._pxBounds = pxBounds;
