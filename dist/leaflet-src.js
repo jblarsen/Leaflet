@@ -1,5 +1,5 @@
 /*
- Leaflet 1.0.0-beta.2 (efba21b), a JS library for interactive maps. http://leafletjs.com
+ Leaflet 1.0.0-beta.2 (1fc61ec), a JS library for interactive maps. http://leafletjs.com
  (c) 2010-2015 Vladimir Agafonkin, (c) 2010-2011 CloudMade
 */
 (function (window, document, undefined) {
@@ -1663,7 +1663,9 @@ L.Map = L.Evented.extend({
 		trackResize: true,
 		markerZoomAnimation: true,
 		maxBoundsViscosity: 0.0,
-		transform3DLimit: 8388608 // Precision limit of a 32-bit float
+		transform3DLimit: 8388608, // Precision limit of a 32-bit float
+		zoomSnap: 1,
+		zoomDelta: 1
 	},
 
 	initialize: function (id, options) { // (HTMLElement or String, Object)
@@ -1718,11 +1720,13 @@ L.Map = L.Evented.extend({
 	},
 
 	zoomIn: function (delta, options) {
-		return this.setZoom(this._zoom + (delta || 1), options);
+		delta = delta || (L.Browser.any3d ? this.options.zoomDelta : 1);
+		return this.setZoom(this._zoom + delta, options);
 	},
 
 	zoomOut: function (delta, options) {
-		return this.setZoom(this._zoom - (delta || 1), options);
+		delta = delta || (L.Browser.any3d ? this.options.zoomDelta : 1);
+		return this.setZoom(this._zoom - delta, options);
 	},
 
 	setZoomAround: function (latlng, zoom, options) {
@@ -1878,11 +1882,8 @@ L.Map = L.Evented.extend({
 	},
 
 	stop: function () {
-		L.Util.cancelAnimFrame(this._flyToFrame);
-		if (this._panAnim) {
-			this._panAnim.stop();
-		}
-		return this;
+		this.setZoom(this._limitZoom(this._zoom));
+		return this._stop();
 	},
 
 	// TODO handler.addTo
@@ -1976,31 +1977,25 @@ L.Map = L.Evented.extend({
 
 	getBoundsZoom: function (bounds, inside, padding) { // (LatLngBounds[, Boolean, Point]) -> Number
 		bounds = L.latLngBounds(bounds);
-
-		var zoom = this.getMinZoom() - (inside ? 1 : 0),
-		    maxZoom = this.getMaxZoom(),
-		    size = this.getSize(),
-
-		    nw = bounds.getNorthWest(),
-		    se = bounds.getSouthEast(),
-
-		    zoomNotFound = true,
-		    boundsSize;
-
 		padding = L.point(padding || [0, 0]);
 
-		do {
-			zoom++;
-			boundsSize = this.project(se, zoom).subtract(this.project(nw, zoom)).add(padding).floor();
-			zoomNotFound = !inside ? size.contains(boundsSize) : boundsSize.x < size.x || boundsSize.y < size.y;
+		var zoom = this.getZoom() || 0,
+		    min = this.getMinZoom(),
+		    max = this.getMaxZoom(),
+		    nw = bounds.getNorthWest(),
+		    se = bounds.getSouthEast(),
+		    size = this.getSize(),
+		    boundsSize = this.project(se, zoom).subtract(this.project(nw, zoom)).add(padding),
+		    snap = L.Browser.any3d ? this.options.zoomSnap : 1;
 
-		} while (zoomNotFound && zoom <= maxZoom);
+		var scale = Math.min(size.x / boundsSize.x, size.y / boundsSize.y);
+		zoom = this.getScaleZoom(scale, zoom);
 
-		if (zoomNotFound && inside) {
-			return null;
+		if (snap) {
+			zoom = inside ? Math.ceil(zoom / snap) * snap : Math.floor(zoom / snap) * snap;
 		}
 
-		return inside ? zoom : zoom - 1;
+		return Math.max(min, Math.min(max, zoom));
 	},
 
 	getSize: function () {
@@ -2184,6 +2179,8 @@ L.Map = L.Evented.extend({
 		this._loaded = true;
 		zoom = this._limitZoom(zoom);
 
+		this.fire('viewprereset');
+
 		var zoomChanged = this._zoom !== zoom;
 		this
 			._moveStart(zoomChanged)
@@ -2226,6 +2223,14 @@ L.Map = L.Evented.extend({
 			this.fire('zoomend');
 		}
 		return this.fire('moveend');
+	},
+
+	_stop: function () {
+		L.Util.cancelAnimFrame(this._flyToFrame);
+		if (this._panAnim) {
+			this._panAnim.stop();
+		}
+		return this;
 	},
 
 	_rawPanBy: function (offset) {
@@ -2483,9 +2488,11 @@ L.Map = L.Evented.extend({
 
 	_limitZoom: function (zoom) {
 		var min = this.getMinZoom(),
-		    max = this.getMaxZoom();
-		if (!L.Browser.any3d) { zoom = Math.round(zoom); }
-
+		    max = this.getMaxZoom(),
+		    snap = L.Browser.any3d ? this.options.zoomSnap : 1;
+		if (snap) {
+			zoom = Math.round(zoom / snap) * snap;
+		}
 		return Math.max(min, Math.min(max, zoom));
 	}
 });
@@ -2826,7 +2833,8 @@ L.GridLayer = L.Layer.extend({
 
 	getEvents: function () {
 		var events = {
-			viewreset: this._resetAll,
+			viewprereset: this._invalidateAll,
+			viewreset: this._resetView,
 			zoom: this._resetView,
 			moveend: this._onMoveEnd
 		};
@@ -2974,6 +2982,7 @@ L.GridLayer = L.Layer.extend({
 	},
 
 	_pruneTiles: function () {
+
 		var key, tile;
 
 		var zoom = this._map.getZoom();
@@ -3017,7 +3026,7 @@ L.GridLayer = L.Layer.extend({
 		}
 	},
 
-	_resetAll: function () {
+	_invalidateAll: function () {
 		for (var z in this._levels) {
 			L.DomUtil.remove(this._levels[z].el);
 			delete this._levels[z];
@@ -3025,7 +3034,6 @@ L.GridLayer = L.Layer.extend({
 		this._removeAllTiles();
 
 		this._tileZoom = null;
-		this._resetView();
 	},
 
 	_retainParent: function (x, y, z, minZoom) {
@@ -3171,8 +3179,10 @@ L.GridLayer = L.Layer.extend({
 
 	_getTiledPixelBounds: function (center) {
 		var map = this._map,
+		    mapZoom = map._animatingZoom ? Math.max(map._animateToZoom, map.getZoom()) : map.getZoom(),
+		    scale = map.getZoomScale(mapZoom, this._tileZoom),
 		    pixelCenter = map.project(center, this._tileZoom).floor(),
-		    halfSize = map.getSize().divideBy(2);
+		    halfSize = map.getSize().divideBy(scale * 2);
 
 		return new L.Bounds(pixelCenter.subtract(halfSize), pixelCenter.add(halfSize));
 	},
@@ -3391,6 +3401,14 @@ L.GridLayer = L.Layer.extend({
 		if (this._noTilesToLoad()) {
 			this._loading = false;
 			this.fire('load');
+
+			if (L.Browser.ielt9 || !this._map._fadeAnimated) {
+				L.Util.requestAnimFrame(this._pruneTiles, this);
+			} else {
+				// Wait a bit more than 0.2 secs (the duration of the tile fade-in)
+				// to trigger a pruning.
+				setTimeout(L.bind(this._pruneTiles, this), 250);
+			}
 		}
 	},
 
@@ -5556,7 +5574,7 @@ L.Polyline = L.Path.extend({
 		var w = this._clickTolerance(),
 		    p = new L.Point(w, w);
 
-		if (this._bounds.isValid()) {
+		if (this._bounds.isValid() && pxBounds.isValid()) {
 			pxBounds.min._subtract(p);
 			pxBounds.max._add(p);
 			this._pxBounds = pxBounds;
@@ -7428,7 +7446,7 @@ L.Map.Drag = L.Handler.extend({
 	},
 
 	_onDown: function () {
-		this._map.stop();
+		this._map._stop();
 	},
 
 	_onDragStart: function () {
@@ -7585,7 +7603,8 @@ L.Map.DoubleClickZoom = L.Handler.extend({
 	_onDoubleClick: function (e) {
 		var map = this._map,
 		    oldZoom = map.getZoom(),
-		    zoom = e.originalEvent.shiftKey ? Math.ceil(oldZoom) - 1 : Math.floor(oldZoom) + 1;
+		    delta = map.options.zoomDelta,
+		    zoom = e.originalEvent.shiftKey ? oldZoom - delta : oldZoom + delta;
 
 		if (map.options.doubleClickZoom === 'center') {
 			map.setZoom(zoom);
@@ -7605,7 +7624,8 @@ L.Map.addInitHook('addHandler', 'doubleClickZoom', L.Map.DoubleClickZoom);
 
 L.Map.mergeOptions({
 	scrollWheelZoom: true,
-	wheelDebounceTime: 40
+	wheelDebounceTime: 40,
+	wheelPxPerZoomLevel: 50
 });
 
 L.Map.ScrollWheelZoom = L.Handler.extend({
@@ -7641,14 +7661,15 @@ L.Map.ScrollWheelZoom = L.Handler.extend({
 
 	_performZoom: function () {
 		var map = this._map,
-		    delta = this._delta,
 		    zoom = map.getZoom();
 
-		map.stop(); // stop panning and fly animations if any
+		map._stop(); // stop panning and fly animations if any
 
 		// map the delta with a sigmoid function to -4..4 range leaning on -1..1
-		var d2 = Math.ceil(4 * Math.log(2 / (1 + Math.exp(-Math.abs(delta / 200)))) / Math.LN2);
-		delta = map._limitZoom(zoom + (delta > 0 ? d2 : -d2)) - zoom;
+		var d2 = this._delta / (this._map.options.wheelPxPerZoomLevel * 4),
+		    d3 = 4 * Math.log(2 / (1 + Math.exp(-Math.abs(d2)))) / Math.LN2,
+		    d4 = Math.max(d3, this._map.options.zoomSnap || 0),
+		    delta = map._limitZoom(zoom + (this._delta > 0 ? d4 : -d4)) - zoom;
 
 		this._delta = 0;
 		this._startTime = null;
@@ -7909,7 +7930,7 @@ L.Map.TouchZoom = L.Handler.extend({
 		this._moved = false;
 		this._zooming = true;
 
-		map.stop();
+		map._stop();
 
 		L.DomEvent
 		    .on(document, 'touchmove', this._onTouchMove, this)
@@ -7970,11 +7991,8 @@ L.Map.TouchZoom = L.Handler.extend({
 		    .off(document, 'touchmove', this._onTouchMove)
 		    .off(document, 'touchend', this._onTouchEnd);
 
-		var zoom = this._zoom;
-		zoom = this._map._limitZoom(zoom - this._startZoom > 0 ? Math.ceil(zoom) : Math.floor(zoom));
-
-
-		this._map._animateZoom(this._center, zoom, true, true);
+		// Pinch updates GridLayers' levels only when snapZoom is off, so snapZoom becomes noUpdate.
+		this._map._animateZoom(this._center, this._map._limitZoom(this._zoom), true, this._map.options.snapZoom);
 	}
 });
 
@@ -8223,8 +8241,7 @@ L.Map.addInitHook('addHandler', 'boxZoom', L.Map.BoxZoom);
 
 L.Map.mergeOptions({
 	keyboard: true,
-	keyboardPanOffset: 80,
-	keyboardZoomOffset: 1
+	keyboardPanDelta: 80
 });
 
 L.Map.Keyboard = L.Handler.extend({
@@ -8241,8 +8258,8 @@ L.Map.Keyboard = L.Handler.extend({
 	initialize: function (map) {
 		this._map = map;
 
-		this._setPanOffset(map.options.keyboardPanOffset);
-		this._setZoomOffset(map.options.keyboardZoomOffset);
+		this._setPanDelta(map.options.keyboardPanDelta);
+		this._setZoomDelta(map.options.zoomDelta);
 	},
 
 	addHooks: function () {
@@ -8303,35 +8320,35 @@ L.Map.Keyboard = L.Handler.extend({
 		this._map.fire('blur');
 	},
 
-	_setPanOffset: function (pan) {
+	_setPanDelta: function (panDelta) {
 		var keys = this._panKeys = {},
 		    codes = this.keyCodes,
 		    i, len;
 
 		for (i = 0, len = codes.left.length; i < len; i++) {
-			keys[codes.left[i]] = [-1 * pan, 0];
+			keys[codes.left[i]] = [-1 * panDelta, 0];
 		}
 		for (i = 0, len = codes.right.length; i < len; i++) {
-			keys[codes.right[i]] = [pan, 0];
+			keys[codes.right[i]] = [panDelta, 0];
 		}
 		for (i = 0, len = codes.down.length; i < len; i++) {
-			keys[codes.down[i]] = [0, pan];
+			keys[codes.down[i]] = [0, panDelta];
 		}
 		for (i = 0, len = codes.up.length; i < len; i++) {
-			keys[codes.up[i]] = [0, -1 * pan];
+			keys[codes.up[i]] = [0, -1 * panDelta];
 		}
 	},
 
-	_setZoomOffset: function (zoom) {
+	_setZoomDelta: function (zoomDelta) {
 		var keys = this._zoomKeys = {},
 		    codes = this.keyCodes,
 		    i, len;
 
 		for (i = 0, len = codes.zoomIn.length; i < len; i++) {
-			keys[codes.zoomIn[i]] = zoom;
+			keys[codes.zoomIn[i]] = zoomDelta;
 		}
 		for (i = 0, len = codes.zoomOut.length; i < len; i++) {
-			keys[codes.zoomOut[i]] = -zoom;
+			keys[codes.zoomOut[i]] = -zoomDelta;
 		}
 	},
 
@@ -8630,13 +8647,13 @@ L.Control.Zoom = L.Control.extend({
 
 	_zoomIn: function (e) {
 		if (!this._disabled) {
-			this._map.zoomIn(e.shiftKey ? 3 : 1);
+			this._map.zoomIn(this._map.options.zoomDelta * (e.shiftKey ? 3 : 1));
 		}
 	},
 
 	_zoomOut: function (e) {
 		if (!this._disabled) {
-			this._map.zoomOut(e.shiftKey ? 3 : 1);
+			this._map.zoomOut(this._map.options.zoomDelta * (e.shiftKey ? 3 : 1));
 		}
 	},
 
@@ -9273,7 +9290,7 @@ L.Map.include({
 		center = this._limitCenter(L.latLng(center), zoom, this.options.maxBounds);
 		options = options || {};
 
-		this.stop();
+		this._stop();
 
 		if (this._loaded && !options.reset && options !== true) {
 
@@ -9504,7 +9521,7 @@ L.Map.include({
 			return this.setView(targetCenter, targetZoom, options);
 		}
 
-		this.stop();
+		this._stop();
 
 		var from = this.project(this.getCenter()),
 		    to = this.project(targetCenter),
